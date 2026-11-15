@@ -1,0 +1,10 @@
+/.vscode/
+/build/
+/CODE_USAGE_GUIDE.md
+/INIT_AND_ISR_FLOW.md
+/STATE_MACHINE.md
+/超电控制板交接文档.md
+/SuperCap/Remaked_SuperCap/cmake-build-debug-mingwstm32-gccg/
+/SuperCap/Remaked_SuperCap/tests/
+/.idea/
+/docs/
