@@ -60,7 +60,7 @@ static void enter(supercap_state_t *s, sc_mode_t mode)
         /* PA4 接通前的测量值，用于识别接入瞬间的异常跳变。 */
         s->connect_vbat = s->adc_values.battery_voltage;
         s->connect_vcap = s->adc_values.supercap_voltage;
-        s->connect_icap = s->adc_values.supercap_current;
+        // s->connect_icap = s->adc_values.supercap_current;
         PID_Reset(&s->pi_current);
     }
     if (mode == SC_CROSS_ZERO || mode == SC_STOPPING) 
@@ -235,6 +235,14 @@ void  SC_Init(supercap_state_t *s)
     s->adc_values = (sc_adc_values_t){0};
     s->battery_power = s->supercap_power = s->load_current = 0.0f;
     s->power_reference = POWER_REFERENCE_DEFAULT;
+    /* 上位机控制状态：本次上电尚无预算、无存活数据、未应用使能。 */
+    s->host_control.budget_valid = false;
+    s->host_control.budget_rx_ms = 0U;
+    s->host_control.timing_from_frame = false;
+    s->host_control.robot_alive_valid = false;
+    s->host_control.robot_alive = 0U;
+    s->host_control.enable_applied = false;
+    s->host_control.enable_applied_ms = 0U;
     s->load_power = s->battery_power_target = s->battery_power_error = 0.0f;
     s->power_limit_exceeded = false;
     reset_power_control(s);
@@ -280,6 +288,90 @@ void SC_SetRequest(supercap_state_t *s, sc_request_t request)
 void SC_RequestFaultReset(supercap_state_t *s)
 {
     if (s != NULL && s->mode == SC_FAULT_LATCHED) s->reset_requested = true;
+}
+
+/* ============================================================================
+ * 上位机下行控制接入（仅 TIM1 控制上下文调用）
+ * ========================================================================== */
+
+/* 有效控制帧：新鲜时更新预算与存活状态；过期帧不重新应用旧预算。 */
+void SC_ApplyControlCommand(supercap_state_t *s, float budget_w,
+                            uint8_t robot_alive, uint32_t rx_ms, uint32_t now_ms)
+{
+    if (s == NULL)
+    {
+        return;
+    }
+    if ((uint32_t)(now_ms - rx_ms) >= SC_CONTROL_LOSS_TIMEOUT_MS)
+    {
+        /* 控制帧自身已达到时限：不更新预算、存活状态或计时。 */
+        return;
+    }
+
+    s->host_control.budget_valid = true;
+    s->host_control.budget_rx_ms = rx_ms;
+    s->host_control.robot_alive_valid = true;
+    s->host_control.robot_alive = robot_alive;
+    /* 使能前也可缓存新鲜预算；但不因此启动板端，第一段计时仍从使能开始。 */
+    s->power_reference = budget_w;
+    if (sc_run_enable == 1U)
+    {
+        /* 使能后的有效控制帧把失联计时切换到该帧的接收时间。 */
+        s->host_control.timing_from_frame = true;
+    }
+}
+
+/* 首次使能：只允许置位运行开关；重复请求不重启自检、不清故障、不重置计时。 */
+void SC_ApplyEnableRequest(supercap_state_t *s, uint32_t now_ms)
+{
+    if (s == NULL)
+    {
+        return;
+    }
+    if (sc_run_enable == 1U)
+    {
+        return;
+    }
+
+    sc_run_enable = 1U;
+    s->host_control.enable_applied = true;
+    s->host_control.enable_applied_ms = now_ms;
+    s->host_control.timing_from_frame = false;
+
+    /* 使能请求本身不检查年龄；缓存预算已过期或不存在时使用默认预算。 */
+    if (!s->host_control.budget_valid ||
+        (uint32_t)(now_ms - s->host_control.budget_rx_ms) >= SC_CONTROL_LOSS_TIMEOUT_MS)
+    {
+        s->power_reference = POWER_REFERENCE_DEFAULT;
+    }
+}
+
+/* 已使能后按第一段（使能应用时间）或后续（最近有效控制帧）计时；
+ * 达到时限只恢复默认预算，不失能、不重置控制器。 */
+void SC_AdvanceControlTimeout(supercap_state_t *s, uint32_t now_ms)
+{
+    uint32_t base_ms;
+
+    if (s == NULL || sc_run_enable != 1U || !s->host_control.enable_applied)
+    {
+        /* 未使能不启动运行失联计时。 */
+        return;
+    }
+
+    if (s->host_control.timing_from_frame)
+    {
+        base_ms = s->host_control.budget_rx_ms;
+    }
+    else
+    {
+        base_ms = s->host_control.enable_applied_ms;
+    }
+
+    /* 无符号毫秒差值自然处理计数回绕；499 ms 未超时，500 ms 进入超时。 */
+    if ((uint32_t)(now_ms - base_ms) >= SC_CONTROL_LOSS_TIMEOUT_MS)
+    {
+        s->power_reference = POWER_REFERENCE_DEFAULT;
+    }
 }
 
 /* 按当前板卡 ADC 标定系数换算五路数据，并标记已有可用快照。 */
@@ -713,7 +805,8 @@ void SC_Step(supercap_state_t *s)
             s->stop_reason = SC_STOP_REASON_REQUEST;
             enter(s, SC_STOPPING);
         }
-        else if (fabsf(s->adc_values.supercap_current - s->connect_icap) > SC_CONNECT_JUMP_A ||
+        else if (
+            // fabsf(s->adc_values.supercap_current - s->connect_icap) > SC_CONNECT_JUMP_A ||
             fabsf(s->adc_values.battery_voltage - s->connect_vbat) > SC_CONNECT_JUMP_V ||
             fabsf(s->adc_values.supercap_voltage - s->connect_vcap) > SC_CONNECT_JUMP_V)
         {

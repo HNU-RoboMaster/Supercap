@@ -114,7 +114,7 @@ extern "C" {
    功率控制默认值
    ======================================================================== */
 
-/** 电管chassis输出口参考功率上限（W）：当前由初始化宏设置，预留未来 CAN 更新。 */
+/** 电池侧功率预算的重启/失联兜底值（W）；CAN 动态预算应写入 power_reference，不修改此宏。 */
 #define POWER_REFERENCE_DEFAULT (60.0f)
 
 /** 实际调节目标为 max(0, 参考上限 - 余量)，为误差与动态响应预留空间。 */
@@ -125,6 +125,14 @@ extern "C" {
 #define SC_AUTO_DISCHARGE_RESUME_VOLTAGE (8.0f)
 #define SC_AUTO_CHARGE_RESTART_VOLTAGE  (25.0f)
 
+
+/* ========================================================================
+   CAN 下行控制
+   ======================================================================== */
+
+/** 上位机控制帧超时（ms）：使能后连续无有效功率指令达到该值，
+ *  恢复 POWER_REFERENCE_DEFAULT；收到新的有效功率指令即切回上位机预算。 */
+#define SC_CONTROL_LOSS_TIMEOUT_MS (500U)
 
 /* ========================================================================
    CAN 反馈判据
@@ -218,7 +226,7 @@ extern "C" {
 /* 电流及接入判据，单位 A；接入电压跳变判据单位 V。 */
 #define SC_CURRENT_ZERO_A      (0.25f) /* 换向/停机的实测电流近零门限 */
 #define SC_SELF_TEST_ZERO_A    (0.6f)  /* 自检时电流零点容差 */
-#define SC_CONNECT_JUMP_A      (1.0f)  /* Q3 接入瞬间允许的电流变化 */
+#define SC_CONNECT_JUMP_A      (2.0f)  /* Q3 接入瞬间允许的电流变化 */
 #define SC_CONNECT_JUMP_V      (5.0f)  /* Q3 接入瞬间允许的电压变化 */
 #define SC_LOAD_ENTER_A        (3.0f)  /* 放电进入负载门限 */
 #define SC_LOAD_EXIT_A         (2.0f)  /* 放电退出负载门限，形成回差 */

@@ -82,6 +82,19 @@ typedef struct {
     float supercap_power;           /* 电容组功率，W；放电为正，充电为负 */
 } sc_feedback_snapshot_t;
 
+/* 上位机下行控制的运行时状态；只由 TIM1 控制上下文更新。
+ * 接收信息的有效性与 0/1 存活值分开，避免初始化零值或失联被当作死亡。 */
+typedef struct {
+    bool budget_valid;          /* 上位机发送的power_reference */
+    uint32_t budget_rx_ms;      /* 功率控制帧接收时间，用于判断500ms断连 */
+    bool timing_from_frame;     /* 表示使能后已收到过有效控制帧 */
+    bool enable_applied;        /* 接收到CAN使能标志位（非调试器使能） */
+    uint32_t enable_applied_ms; /* 首次使能应用时刻；第一段控制超时从此刻起算 */
+
+    bool robot_alive_valid;     /* 存活字段有效 */
+    uint8_t robot_alive;        /* 最近有效控制帧的存活值；首版不据此改变运行 */
+} sc_host_control_t;
+
 
 typedef struct {
 
@@ -94,7 +107,9 @@ typedef struct {
     float load_power;                      /* Pbat + Pcap，含变换器损耗的负载估计 */
     float load_current;                    // 由load_power反向推算得到
 
-    float power_reference;                 /* 电管chassis输出口功率上限，初始化宏设置，预留 CAN */
+    float power_reference;                 /* 运行时电池侧预算（W）；重启/失联取默认值，预留 CAN 动态更新 */
+
+    sc_host_control_t host_control;        /* 上位机下行控制状态；仅 TIM1 控制上下文更新 */
 
     float battery_power_target;     // 用于功率环闭环的实际功率值限制，低于power_reference
     float battery_power_error;      // 功率环误差
@@ -126,7 +141,7 @@ typedef struct {
     volatile sc_stop_reason_t stop_reason;  /* 反馈用：最近一次进入 SC_STOPPING 的原因 */
 
     // 运行模式标志位
-    volatile sc_request_t request;  // 来自上位机，一般为auto
+    volatile sc_request_t request;  // 板内工作请求；首版 CAN 只传预算，充放电由 AUTO 决定
     sc_request_t active_request;            /* 自动决策后实际执行的停止/充电/放电请求 */
 
     // 运行阶段标志位
@@ -172,15 +187,22 @@ typedef struct {
 } supercap_state_t;
 
 extern supercap_state_t sc_state;   // 储存超电所有业务状态的统一结构体
-/** 外部运行开关：上电默认 0；1 从自检开始，运行中置 0 走 SC_STOPPING。 */
+/** 板端运行开关：上电默认 0；1 从自检开始。CAN 首次使能接入只允许置 1，不允许清零。 */
 extern volatile uint8_t sc_run_enable;
 
 /** 初始化 PI 和输出；默认自动充放电，等待运行开关置 1 后开始自检。 */
 void SC_Init(supercap_state_t *state);
-/** 设置停止、充电、放电或自动请求；故障恢复仍须满足连续健康条件。 */
+/** 板内/调试工作请求接口，首版 CAN 不直接调用；故障恢复仍须满足连续健康条件。 */
 void SC_SetRequest(supercap_state_t *state, sc_request_t request);
 /** 保留手动复位接口；与自动恢复使用相同的连续健康判据，不跳过等待。 */
 void SC_RequestFaultReset(supercap_state_t *state);
+/** 应用一帧有效上位机控制参数；接收时间超过控制时限的帧被忽略。 */
+void SC_ApplyControlCommand(supercap_state_t *state, float budget_w,
+                            uint8_t robot_alive, uint32_t rx_ms, uint32_t now_ms);
+/** 消费首次使能请求：只置位运行开关并建立计时，不重置状态机或故障。 */
+void SC_ApplyEnableRequest(supercap_state_t *state, uint32_t now_ms);
+/** 推进控制失联计时：已使能后连续无有效控制帧达到时限时恢复默认预算。 */
+void SC_AdvanceControlTimeout(supercap_state_t *state, uint32_t now_ms);
 /** 将五路 ADC 原始值换算为电压、电流和预留温度量。 */
 void SC_ADC_ConvertToPhysical(supercap_state_t *state, const uint16_t *adc_raw);
 /** 计算电池、电容功率以及供放电许可使用的负载电流估计值。 */

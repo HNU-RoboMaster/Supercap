@@ -21,13 +21,19 @@
 #include "fdcan.h"
 
 /* USER CODE BEGIN 0 */
-CAN_ReceiveDataTypeDef sCAN_RX_data;
-
-uint8_t CAN_ReceiveDataRefresh_Flag = 1;
-uint8_t CAN_WDG_Count = 0;
-
-FDCAN_RxHeaderTypeDef sFDCAN1_RxHeader;
 FDCAN_TxHeaderTypeDef sFDCAN1_TxHeader;
+
+/* 中断与 TIM1 之间的交接缓存：发布先写数据和时间，最后置新数据标志。 */
+typedef struct
+{
+    volatile bool enable_pending;
+    volatile bool control_pending;
+    volatile uint16_t budget_w;
+    volatile uint8_t robot_alive;
+    volatile uint32_t rx_ms;
+} can_command_cache_t;
+
+static can_command_cache_t s_command_cache;
 /* USER CODE END 0 */
 
 FDCAN_HandleTypeDef hfdcan1;
@@ -145,8 +151,120 @@ void HAL_FDCAN_MspDeInit(FDCAN_HandleTypeDef* fdcanHandle)
 
 /* USER CODE BEGIN 1 */
 
+void CAN_Command_Init(void)
+{
+    s_command_cache.enable_pending = false;
+    s_command_cache.control_pending = false;
+    s_command_cache.budget_w = 0U;
+    s_command_cache.robot_alive = 0U;
+    s_command_cache.rx_ms = 0U;
+}
+
+/**
+ * 校验 HAL 帧头与命令类型并解码。
+ * 非法帧（错误 ID、扩展帧、远程帧、FD 帧、错误长度、未知类型、非法存活值）
+ * 返回 false，调用方不得发布任何更新。保留字节不参与解码。
+ */
+static bool CAN_Command_Decode(const FDCAN_RxHeaderTypeDef *header, const uint8_t *data,
+                               can_command_t *out)
+{
+    if (header == NULL || data == NULL || out == NULL)
+    {
+        return false;
+    }
+
+    /* 本协议只接受 0x221 的标准经典数据帧，长度必须为 8。 */
+    if (header->IdType != FDCAN_STANDARD_ID ||
+        header->Identifier != CAN_ID_BUS_TO_SUPERCAP ||
+        header->RxFrameType != FDCAN_DATA_FRAME ||
+        header->FDFormat != FDCAN_CLASSIC_CAN ||
+        header->DataLength != FDCAN_DLC_BYTES_8)
+    {
+        return false;
+    }
+
+    out->is_control = false;
+    out->enable_request = false;
+    out->budget_w = 0U;
+    out->robot_alive = 0U;
+
+    switch (data[CAN_COMMAND_BYTE_TYPE])
+    {
+    case CAN_COMMAND_TYPE_ENABLE:
+        /* Enable=0 是合法报文但不新增请求，也没有失能语义。 */
+        if (data[CAN_COMMAND_BYTE_ENABLE] == CAN_COMMAND_ENABLE_REQUEST)
+        {
+            out->enable_request = true;
+        }
+        return true;
+
+    case CAN_COMMAND_TYPE_CONTROL:
+        /* 大于 1 的存活值属于非法编码；0 的联合处理受 B1 阻塞，仅保存数值。 */
+        if (data[CAN_COMMAND_BYTE_ALIVE] > CAN_COMMAND_ALIVE_MAX)
+        {
+            return false;
+        }
+        out->is_control = true;
+        out->budget_w = (uint16_t)((uint16_t)data[CAN_COMMAND_BYTE_BUDGET_LSB] |
+                                   ((uint16_t)data[CAN_COMMAND_BYTE_BUDGET_MSB] << 8U));
+        out->robot_alive = data[CAN_COMMAND_BYTE_ALIVE];
+        return true;
+
+    default:
+        /* 未知命令类型不更新任何控制意图。 */
+        return false;
+    }
+}
+
+void CAN_Command_Publish(const can_command_t *command, uint32_t rx_ms)
+{
+    if (command == NULL)
+    {
+        return;
+    }
+
+    if (command->is_control)
+    {
+        /* 最新有效完整帧覆盖旧完整帧；不跨帧拼接预算与存活状态。 */
+        s_command_cache.budget_w = command->budget_w;
+        s_command_cache.robot_alive = command->robot_alive;
+        s_command_cache.rx_ms = rx_ms;
+        s_command_cache.control_pending = true;
+    }
+    else if (command->enable_request)
+    {
+        /* 有效使能请求一直保留到消费，不设置过期时间。 */
+        s_command_cache.enable_pending = true;
+    }
+    else
+    {
+        /* Enable=0：不新增请求，也不取消已保留的请求。 */
+    }
+}
+
+void CAN_Command_TakePending(can_command_pending_t *out)
+{
+    if (out == NULL)
+    {
+        return;
+    }
+
+    out->enable_request = s_command_cache.enable_pending;
+    out->control_pending = s_command_cache.control_pending;
+    out->budget_w = s_command_cache.budget_w;
+    out->robot_alive = s_command_cache.robot_alive;
+    out->rx_ms = s_command_cache.rx_ms;
+
+    /* 复制与消费标志清除属于同一次交接；调用方的临界区保证原子性。 */
+    s_command_cache.enable_pending = false;
+    s_command_cache.control_pending = false;
+}
+
 /**
  * 过滤器初始化函数
+ *
+ * HAL_FDCAN_ConfigGlobalFilter() 只在 READY 状态有效，因此必须在
+ * HAL_FDCAN_Start() 之前调用；接收通知由 main() 在启动后单独启用。
  */
 void FDCAN_Filter_Init(void)
 {
@@ -160,45 +278,63 @@ void FDCAN_Filter_Init(void)
     sFilterConfig.FilterID2    = CAN_TEST_ID;             // 0x222
 
     // 配置过滤器
-    if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK) {
+    if (HAL_FDCAN_ConfigFilter(&hfdcan1, &sFilterConfig) != HAL_OK)
+    {
         Error_Handler();
     }
 
     // 全局过滤器配置：拒绝未匹配的帧
-    HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_REJECT, FDCAN_REJECT, FDCAN_REJECT_REMOTE, FDCAN_REJECT_REMOTE);
-
-    // ★ 关键修复：激活 RX FIFO0 新消息中断，否则不会进回调！
-    if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK) {
+    if (HAL_FDCAN_ConfigGlobalFilter(&hfdcan1, FDCAN_REJECT, FDCAN_REJECT,
+                                     FDCAN_REJECT_REMOTE, FDCAN_REJECT_REMOTE) != HAL_OK)
+    {
         Error_Handler();
     }
 }
 
+/* FDCAN 的 RX FIFO0 固定为 3 个元素（HAL 的 SRAMCAN_RF0_NBR）；
+ * 单个接收中断最多消费 3 帧即可取空，保持有界。 */
+#define CAN_COMMAND_RX_BATCH_MAX   (3U)
+/* FDCAN 最大 DLC 为 64 字节；先按容量读取，再校验长度，避免复制溢出。 */
+#define CAN_RX_BUFFER_BYTES        (64U)
+
 /**
  * fdcan接收回调函数
+ *
+ * 只做帧头校验、命令解码和短临界区发布；不修改状态机、PI、PWM 或 Q3。
+ * 帧解析规则见 fdcan.h；测试帧 0x222 与非法帧不会更新控制参数。
  */
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
 {
-    uint8_t CAN_RX_Buff[8];
+    uint8_t rx_data[CAN_RX_BUFFER_BYTES];
+    FDCAN_RxHeaderTypeDef rx_header;
+    can_command_t command;
 
-    if (hfdcan->Instance == FDCAN1)
+    (void)RxFifo0ITs;
+
+    if (hfdcan->Instance != FDCAN1)
     {
-        if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &sFDCAN1_RxHeader, CAN_RX_Buff) == HAL_OK)
+        return;
+    }
+
+    for (uint32_t i = 0U; i < CAN_COMMAND_RX_BATCH_MAX; ++i)
+    {
+        if (HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rx_header, rx_data) != HAL_OK)
         {
-            // CAN看门狗计数清零
-            CAN_WDG_Count = 0;
-
-            if (CAN_ReceiveDataRefresh_Flag)
-            {
-                sCAN_RX_data.Enable      = CAN_RX_Buff[0];
-                sCAN_RX_data.Charge      = CAN_RX_Buff[1];
-                sCAN_RX_data.PowerLimit  = CAN_RX_Buff[2];
-                sCAN_RX_data.ChargePower = CAN_RX_Buff[3];
-
-                // 清除标志位，等待主循环处理后再置1
-                CAN_ReceiveDataRefresh_Flag = 0;
-            }
+            break;
         }
-        // HAL_FDCAN_ActivateNotification(hfdcan, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
+
+        /* 解码在临界区外完成；帧头与字段校验都在解码函数内。 */
+        if (!CAN_Command_Decode(&rx_header, rx_data, &command))
+        {
+            /* 测试帧、未知类型、错误长度等不更新命令，也不刷新控制有效期。 */
+            continue;
+        }
+
+        /* 短临界区发布：保存并恢复进入前的中断屏蔽状态。 */
+        uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        CAN_Command_Publish(&command, HAL_GetTick());
+        __set_PRIMASK(primask);
     }
 }
 
