@@ -29,7 +29,7 @@ extern "C" {
 #include "main.h"
 
 /* USER CODE BEGIN Includes */
-
+#include <stdbool.h>
 /* USER CODE END Includes */
 
 extern FDCAN_HandleTypeDef hfdcan1;
@@ -62,16 +62,56 @@ extern FDCAN_HandleTypeDef hfdcan1;
 #define CAN_FEEDBACK_ENERGY_MIN_VOLTAGE   (8.0f)
 #define CAN_FEEDBACK_ENERGY_MAX_VOLTAGE   (25.0f)
 
-// 接收结构体 (电控发来，13字节拆分)
-typedef struct {
-  uint8_t Charge ;              // 超级电容充电。1充电，0放电
-  uint8_t Enable ;              // 超级电容给使能。1使能，0失能
-  uint8_t PowerLimit;           // 裁判系统功率限制
-  uint8_t ChargePower;          // 超级电容充电功率
-  uint8_t Dead;                 // 机器人死亡状态
-  float PowerLimitAfterOffset;  // 本地计算的补偿限制
-  float ChargePowerAfterOffset; // 本地计算的补偿功率
-} CAN_ReceiveDataTypeDef;
+/* 下行命令帧 0x221 的报文契约（标准帧、经典数据帧、DLC 8）：
+ * 字节 0 为命令类型，0x01 使能、0x02 控制；
+ * 使能帧字节 1 为 Enable（1 请求首次使能，0 无失能语义）；
+ * 控制帧字节 1 为 RobotAlive（首版恒为 1，0 的处理待讨论），
+ * 字节 2～3 为电池侧预算（小端 uint16_t、1 W/LSB），字节 4～7 保留并忽略。 */
+#define CAN_COMMAND_DLC                 (8U)
+#define CAN_COMMAND_BYTE_TYPE           (0U)
+#define CAN_COMMAND_BYTE_ENABLE         (1U)
+#define CAN_COMMAND_BYTE_ALIVE          (1U)
+#define CAN_COMMAND_BYTE_BUDGET_LSB     (2U)
+#define CAN_COMMAND_BYTE_BUDGET_MSB     (3U)
+
+#define CAN_COMMAND_TYPE_ENABLE         (0x01U)
+#define CAN_COMMAND_TYPE_CONTROL        (0x02U)
+#define CAN_COMMAND_ENABLE_REQUEST      (1U)
+#define CAN_COMMAND_ALIVE_MAX           (1U)
+/* 预算换算：budget_w = (float)raw_budget × 1 W/LSB，不额外限制取值。 */
+#define CAN_COMMAND_BUDGET_SCALE        (1.0f)
+
+/* 一帧通过校验后的命令内容：使能请求与控制参数各用各的字段。 */
+typedef struct
+{
+  bool is_control;      /* true：控制命令(0x02)；false：使能命令(0x01) */
+  bool enable_request;  /* 使能命令且 Enable=1；控制命令恒为 false */
+  uint16_t budget_w;    /* 控制命令的电池侧预算，1 W/LSB */
+  uint8_t robot_alive;  /* 控制命令的存活标志 */
+} can_command_t;
+
+/* 待应用命令的本地交接视图；接收时间属于本地元数据，不占业务字节。 */
+typedef struct
+{
+  bool enable_request;   /* 有待消费的首次使能请求 */
+  bool control_pending;  /* 有新的完整控制参数 */
+  uint16_t budget_w;     /* 最新完整控制帧的预算 */
+  uint8_t robot_alive;   /* 同一控制帧的存活标志 */
+  uint32_t rx_ms;        /* 同一控制帧的本地接收时间 */
+} can_command_pending_t;
+
+/** 初始化命令缓存；须在接收中断使能前调用。 */
+void CAN_Command_Init(void);
+/**
+ * 发布一帧已解码命令；调用方（FDCAN 接收回调）负责用短临界区包住本函数。
+ * 控制帧覆盖旧控制参数；使能请求保留到消费，Enable=0 不产生也不取消请求。
+ */
+void CAN_Command_Publish(const can_command_t *command, uint32_t rx_ms);
+/**
+ * 取走待处理命令并清除对应标志；调用方（TIM1 控制周期）负责用短临界区包住本函数。
+ * rx_ms 只在 control_pending 为 true 时有效。
+ */
+void CAN_Command_TakePending(can_command_pending_t *out);
 
 // 发送结构体 (发给电控，0x220，DLC 8)
 typedef struct {
@@ -81,11 +121,7 @@ typedef struct {
   float SuperCapVoltage;        // 字节 4：电容组电压，用于 8~25 V 储能百分比
 } CAN_TransmitDataTypeDef;
 
-// 暴露给外部的全局变量和函数
-extern CAN_ReceiveDataTypeDef sCAN_RX_data;
-extern uint8_t CAN_ReceiveDataRefresh_Flag;
-extern uint8_t CAN_WDG_Count;
-
+// 暴露给外部的函数
 void FDCAN_Filter_Init(void);
 
 /**

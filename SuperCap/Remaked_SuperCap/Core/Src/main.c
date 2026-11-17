@@ -115,12 +115,19 @@ int main(void)
   HAL_GPIO_WritePin(CapDownCtrl_GPIO_Port, CapDownCtrl_Pin, GPIO_PIN_RESET);
 
   /* ---- 启动 FDCAN（CAN 总线通信） ---- */
+  /* 下行命令缓存须在接收中断使能前清零。 */
+  CAN_Command_Init();
+  /* 全局过滤只在 READY 状态有效，必须先配置过滤再启动。 */
+  FDCAN_Filter_Init();
   if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
   {
     Error_Handler();
   }
-  FDCAN_Filter_Init();
-  HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
+  /* 接收通知只在这里启用一次。 */
+  if (HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   /* 只使能通道，保持 MOE=0；HAL 的 PWM_Start 会立即打开 MOE。 */
   __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_3, 0);
@@ -145,31 +152,8 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-
-    /* ---- CAN 接收：事件驱动标志（无需延时） ---- */
-    /* 仅当前一帧已被 RX ISR 消费后才请求新帧。
-     * ISR 在复制数据后将 CAN_ReceiveDataRefresh_Flag 清零。 */
-    if (CAN_ReceiveDataRefresh_Flag == 0) {
-      CAN_ReceiveDataRefresh_Flag = 1;
-    }
-
-    /* ---- CAN 看门狗：500ms 无消息则回退到安全默认值 ---- */
-    {
-      static uint32_t last_can_rx_ms = 0;
-
-      /* 检测新 CAN 消息（RX ISR 在消息到达时将 CAN_WDG_Count 设为 0） */
-      if (CAN_WDG_Count == 0)
-      {
-        last_can_rx_ms = HAL_GetTick();
-        CAN_WDG_Count = 1;  /* 确认收到，等待下一条消息 */
-      }
-
-      if (HAL_GetTick() - last_can_rx_ms > 500)
-      {
-        // can通信超时依旧写入power_reference
-        sc_state.power_reference = POWER_REFERENCE_DEFAULT;
-      }
-    }
+    /* CAN 接收由 FDCAN 中断完成，下行命令在 TIM1 控制周期取走并应用；
+     * 主循环不再写入 power_reference。 */
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

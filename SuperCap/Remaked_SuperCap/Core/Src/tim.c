@@ -276,6 +276,30 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
         /* ================================================================
  * TIM1：200 kHz 更新中断，每两个中断运行一次 100 kHz 控制循环
  * ================================================================ */
+// DEBUG_MODE 不接入CAN通信控制
+#if !SC_DEBUG_MODE
+        /* ---- 0. 取走 CAN 下行命令并在控制上下文应用 ---- */
+        can_command_pending_t can_pending;
+        uint32_t can_primask = __get_PRIMASK();
+        __disable_irq();
+        CAN_Command_TakePending(&can_pending);
+        __set_PRIMASK(can_primask);
+
+        uint32_t now_ms = HAL_GetTick();
+        if (can_pending.control_pending)
+        {
+            /* 先应用本周期到达的有效控制帧，再由超时判断兜底。 */
+            SC_ApplyControlCommand(&sc_state,
+                                   (float)can_pending.budget_w * CAN_COMMAND_BUDGET_SCALE,
+                                   can_pending.robot_alive, can_pending.rx_ms, now_ms);
+        }
+        if (can_pending.enable_request)
+        {
+            /* 首次使能只置位运行开关；启动与自检仍由状态机负责。 */
+            SC_ApplyEnableRequest(&sc_state, now_ms);
+        }
+        SC_AdvanceControlTimeout(&sc_state, now_ms);
+#endif
 
         /* ---- 1. 获取最新 ADC 快照（双缓冲，无数据撕裂） ---- */
         uint8_t adc_half;
