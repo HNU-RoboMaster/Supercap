@@ -22,7 +22,6 @@
 
 /* USER CODE BEGIN 0 */
 CAN_ReceiveDataTypeDef sCAN_RX_data;
-CAN_TransmitDataTypeDef sCAN_TX_data;
 
 uint8_t CAN_ReceiveDataRefresh_Flag = 1;
 uint8_t CAN_WDG_Count = 0;
@@ -203,12 +202,62 @@ void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan, uint32_t RxFifo0ITs)
     }
 }
 
+/* 总功率按 0.01 W/LSB 量化；负值或无效值按 0 处理，上界钳位且不回绕。 */
+static uint16_t feedback_encode_power(float total_power)
+{
+    float scaled = total_power * CAN_FEEDBACK_POWER_SCALE;
+    if (!(scaled > 0.0f))
+    {
+        return 0U;
+    }
+    scaled += 0.5f;
+    if (scaled >= (float)CAN_FEEDBACK_POWER_MAX)
+    {
+        return (uint16_t)CAN_FEEDBACK_POWER_MAX;
+    }
+    return (uint16_t)scaled;
+}
+
+/* 8～25 V 窗口内的储能百分比：100 × (Vcap² − 8²) / (25² − 8²)，就近取整。 */
+static uint8_t feedback_encode_energy(float supercap_voltage)
+{
+    if (supercap_voltage <= CAN_FEEDBACK_ENERGY_MIN_VOLTAGE)
+    {
+        return 0U;
+    }
+    if (supercap_voltage >= CAN_FEEDBACK_ENERGY_MAX_VOLTAGE)
+    {
+        return 100U;
+    }
+    float ratio = 100.0f *
+                  (supercap_voltage * supercap_voltage -
+                   CAN_FEEDBACK_ENERGY_MIN_VOLTAGE * CAN_FEEDBACK_ENERGY_MIN_VOLTAGE) /
+                  (CAN_FEEDBACK_ENERGY_MAX_VOLTAGE * CAN_FEEDBACK_ENERGY_MAX_VOLTAGE -
+                   CAN_FEEDBACK_ENERGY_MIN_VOLTAGE * CAN_FEEDBACK_ENERGY_MIN_VOLTAGE);
+    ratio += 0.5f;
+    if (ratio >= 100.0f)
+    {
+        return 100U;
+    }
+    if (ratio <= 0.0f)
+    {
+        return 0U;
+    }
+    return (uint8_t)ratio;
+}
+
 /**
- * FDCAN发送函数
+ * FDCAN发送函数：组装 0x220 反馈帧，标准帧，DLC 8，逐字节写入。
+ * 队列暂满时立即返回 HAL_BUSY，由调用方在下一周期重新生成。
  */
-void Can_SendMess(CAN_TransmitDataTypeDef *TX_temp)
+HAL_StatusTypeDef Can_SendMess(const CAN_TransmitDataTypeDef *TX_temp)
 {
     static uint8_t FirstSend = 1; // 设为局部静态变量更内聚
+
+    if (TX_temp == NULL)
+    {
+        return HAL_ERROR;
+    }
 
     if (FirstSend) {
         sFDCAN1_TxHeader.BitRateSwitch = FDCAN_BRS_OFF;
@@ -218,33 +267,29 @@ void Can_SendMess(CAN_TransmitDataTypeDef *TX_temp)
         sFDCAN1_TxHeader.DataLength    = FDCAN_DLC_BYTES_8;
         sFDCAN1_TxHeader.TxFrameType   = FDCAN_DATA_FRAME;
 
-        // ★ 补齐必要的 FDCAN 特有设置
-        // sFDCAN1_TxHeader.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-        // sFDCAN1_TxHeader.TxEventFifoControl  = FDCAN_NO_TX_EVENTS;
-        // sFDCAN1_TxHeader.MessageMarker       = 0;
-
         FirstSend                      = 0;
     }
 
-    uint8_t CAN_TX_BUFF[8] = {0};
-    CAN_TX_BUFF[0]         = (uint8_t)TX_temp->SuperCapReady;
-    CAN_TX_BUFF[1]         = (uint8_t)TX_temp->SuperCapState;
-    CAN_TX_BUFF[2]         = TX_temp->SuperCapEnergy;
-    CAN_TX_BUFF[3]         = TX_temp->ChassisPower;
-    CAN_TX_BUFF[4]         = TX_temp->VoltageBat;
-    CAN_TX_BUFF[5]         = TX_temp->DebugOut_BatPower;
-    CAN_TX_BUFF[6]         = (uint8_t)TX_temp->DebugOut_SuperCapPower;
-    // CAN_TX_BUFF[7] 默认是 0
+    /* 先清零整个缓冲，再填入有效字段；保留字节保持 0。
+     * 逐字节编码，避免依赖枚举大小、结构体填充和 CPU 字节序。 */
+    uint8_t CAN_TX_BUFF[CAN_FEEDBACK_DLC] = {0};
+    uint16_t total_power = feedback_encode_power(TX_temp->TotalPower);
 
-    // if(HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0)
-    // {
-    //     return;// HAL_BUSY;
-    // }
-    // HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &sFDCAN1_TxHeader, CAN_TX_BUFF);
+    CAN_TX_BUFF[CAN_FEEDBACK_BYTE_RUN_ENABLE] =
+        (TX_temp->RunEnable == 1U) ? 1U : 0U;
+    CAN_TX_BUFF[CAN_FEEDBACK_BYTE_STATE_FLAGS] =
+        TX_temp->StateFlags & (uint8_t)~CAN_FEEDBACK_FLAGS_RESERVED;
+    CAN_TX_BUFF[CAN_FEEDBACK_BYTE_POWER_LSB] = (uint8_t)(total_power & 0xFFU);
+    CAN_TX_BUFF[CAN_FEEDBACK_BYTE_POWER_MSB] = (uint8_t)((total_power >> 8U) & 0xFFU);
+    CAN_TX_BUFF[CAN_FEEDBACK_BYTE_ENERGY_PCT] =
+        feedback_encode_energy(TX_temp->SuperCapVoltage);
 
-    // 检查FIFO是否有空间
-    // if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0) {
-        HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &sFDCAN1_TxHeader, CAN_TX_BUFF);
-    //}
+    if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0U)
+    {
+        // 队列暂满：结束本次发送，下一周期重新生成最新反馈
+        return HAL_BUSY;
+    }
+
+    return HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &sFDCAN1_TxHeader, CAN_TX_BUFF);
 }
 /* USER CODE END 1 */

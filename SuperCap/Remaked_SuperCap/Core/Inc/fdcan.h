@@ -40,16 +40,27 @@ extern FDCAN_HandleTypeDef hfdcan1;
 #define CAN_ID_BUS_TO_SUPERCAP  0x221
 #define CAN_TEST_ID             0x222
 
-// 超级电容状态枚举
-typedef enum {
-  SUPERCAP_UNREADY = 0,
-  SUPERCAP_READY = 1
-} SuperCapReadyTypeDef;
+/* 反馈帧 0x220 的字节布局（标准帧，DLC 8，TIM2 周期发送） */
+#define CAN_FEEDBACK_DLC                (8U)   /* 反馈帧字节数 */
+#define CAN_FEEDBACK_BYTE_RUN_ENABLE    (0U)   /* 字节 0：sc_run_enable 回读 */
+#define CAN_FEEDBACK_BYTE_STATE_FLAGS   (1U)   /* 字节 1：状态码与语义位 */
+#define CAN_FEEDBACK_BYTE_POWER_LSB     (2U)   /* 字节 2：总功率低字节 */
+#define CAN_FEEDBACK_BYTE_POWER_MSB     (3U)   /* 字节 3：总功率高字节 */
+#define CAN_FEEDBACK_BYTE_ENERGY_PCT    (4U)   /* 字节 4：储能百分比 */
+/* 字节 5～7 保留，发送时填 0 */
 
-typedef enum {
-  E_SUPERCAP_STATE_NORMAL = 0,
-  E_SUPERCAP_STATE_ERROR = 1
-} SuperCapStateTypeDef;
+#define CAN_FEEDBACK_MODE_MASK            (0x0FU) /* 字节 1 低 4 位：sc_mode_t 状态码 */
+#define CAN_FEEDBACK_FLAG_NORMAL_RUNNING  (0x10U) /* 字节 1 bit 4：正常运行 */
+#define CAN_FEEDBACK_FLAG_SUPPLY_REQUEST  (0x20U) /* 字节 1 bit 5：允许上位机发起供能请求 */
+#define CAN_FEEDBACK_FLAGS_RESERVED       (0xC0U) /* 字节 1 bit 6～7：保留 */
+
+/* 总功率量化：1 LSB = 0.01 W，上界 655.35 W，越界钳位且不回绕 */
+#define CAN_FEEDBACK_POWER_SCALE          (100.0f)
+#define CAN_FEEDBACK_POWER_MAX            (65535U)
+
+/* 储能百分比窗口：8 V 及以下为 0，25 V 及以上为 100 */
+#define CAN_FEEDBACK_ENERGY_MIN_VOLTAGE   (8.0f)
+#define CAN_FEEDBACK_ENERGY_MAX_VOLTAGE   (25.0f)
 
 // 接收结构体 (电控发来，13字节拆分)
 typedef struct {
@@ -62,25 +73,26 @@ typedef struct {
   float ChargePowerAfterOffset; // 本地计算的补偿功率
 } CAN_ReceiveDataTypeDef;
 
-// 发送结构体 (发给电控，7字节)
+// 发送结构体 (发给电控，0x220，DLC 8)
 typedef struct {
-  uint8_t SuperCapEnergy;       // 超级电容可用能量：0-100%
-  uint8_t ChassisPower;         // 底盘实时功率：0-255
-  SuperCapReadyTypeDef SuperCapReady; // 超级电容【可用标志】
-  SuperCapStateTypeDef SuperCapState; // 超级电容【状态标志】
-  uint8_t VoltageBat;           // 电池电压*10
-  uint8_t DebugOut_BatPower;
-  int8_t DebugOut_SuperCapPower;
+  uint8_t RunEnable;            // 字节 0：首次使能确认，回读 sc_run_enable
+  uint8_t StateFlags;           // 字节 1：bit0-3 状态码，bit4 正常运行，bit5 允许供能请求
+  float TotalPower;             // 字节 2-3：Pbat + Pcap，单位 W，编码为 0.01 W/LSB
+  float SuperCapVoltage;        // 字节 4：电容组电压，用于 8~25 V 储能百分比
 } CAN_TransmitDataTypeDef;
 
 // 暴露给外部的全局变量和函数
 extern CAN_ReceiveDataTypeDef sCAN_RX_data;
-extern CAN_TransmitDataTypeDef sCAN_TX_data;
 extern uint8_t CAN_ReceiveDataRefresh_Flag;
 extern uint8_t CAN_WDG_Count;
 
 void FDCAN_Filter_Init(void);
-void Can_SendMess(CAN_TransmitDataTypeDef *TX_temp);
+
+/**
+ * 组装并发送 0x220 反馈帧：逐字节编码，DLC 固定 8，保留字节填 0。
+ * 队列暂满时返回 HAL_BUSY，由调用方放弃本次发送。
+ */
+HAL_StatusTypeDef Can_SendMess(const CAN_TransmitDataTypeDef *TX_temp);
 /* USER CODE END Private defines */
 
 void MX_FDCAN1_Init(void);

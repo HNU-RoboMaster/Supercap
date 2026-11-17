@@ -259,12 +259,9 @@ void HAL_TIM_Base_MspDeInit(TIM_HandleTypeDef* tim_baseHandle)
  * TIM1：200 kHz 更新中断，每两个中断运行一次 100 kHz 控制循环
  *   获取新 ADC 快照 → 功率与保护 → 状态机/电流 PI → PWM 与 CapDownCtrl 输出
  *
- * TIM2：CAN 发送（~531 Hz）
- *   构建并发送 CAN 状态消息至主控制器。
+ * TIM2：CAN 反馈发送（2 ms / 500 Hz）
+ *   复制板端反馈快照，编码后发送至主控制器。
  */
-
-
-static CAN_TransmitDataTypeDef tx_msg_temp;
 
 int control_hz=0;
 static uint8_t tim1_pwm_preloaded = 0;
@@ -353,34 +350,38 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     }
     else if (htim->Instance == TIM2) {
         /* ================================================================
-         * TIM2：CAN 发送（~531 Hz）
+         * TIM2：CAN 反馈发送（标称 2 ms / 500 Hz）
          * ================================================================ */
 
-        float vcap = sc_state.adc_values.supercap_voltage;
-        float vbat = sc_state.adc_values.battery_voltage;
+        sc_feedback_snapshot_t snapshot;
+        CAN_TransmitDataTypeDef tx_msg_temp;
 
-        /* 超级电容能量：可用电压范围平方值的百分比 */
-        float energy_denominator =
-            vbat * vbat - SUPERCAP_VOLTAGE_CC * SUPERCAP_VOLTAGE_CC;
-        float cap_energy_pct = energy_denominator > 0.0f ?
-            100.0f * (vcap * vcap - SUPERCAP_VOLTAGE_CC * SUPERCAP_VOLTAGE_CC)
-                   / energy_denominator : 0.0f;
-        if (cap_energy_pct < 0.0f) cap_energy_pct = 0.0f;
-        if (cap_energy_pct > 100.0f) cap_energy_pct = 100.0f;
+        /* TIM1 可抢占本中断：共享字段在短临界区内复制，并恢复进入前的中断状态。 */
+        uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        SC_GetFeedbackSnapshot(&snapshot);
+        __set_PRIMASK(primask);
 
-        tx_msg_temp.SuperCapEnergy         = (uint8_t)cap_energy_pct;
-        tx_msg_temp.ChassisPower           = (uint8_t)(sc_state.battery_power + sc_state.supercap_power);
-        tx_msg_temp.SuperCapReady          =
-            (sc_state.mode != SC_SELF_TEST && sc_state.mode != SC_FAULT_LATCHED) ?
-            SUPERCAP_READY : SUPERCAP_UNREADY;
-        tx_msg_temp.SuperCapState          =
-            sc_state.mode == SC_FAULT_LATCHED ?
-            E_SUPERCAP_STATE_ERROR : E_SUPERCAP_STATE_NORMAL;
-        tx_msg_temp.VoltageBat             = (uint8_t)(10.0f * vbat);
-        tx_msg_temp.DebugOut_BatPower      = (uint8_t)sc_state.battery_power;
-        tx_msg_temp.DebugOut_SuperCapPower = (int8_t)sc_state.supercap_power;
+        /* 字节 1：状态码与两个语义位；字节组装和 FDCAN 入队在 fdcan.c 完成。 */
+        tx_msg_temp.RunEnable = (snapshot.run_enable == 1U) ? 1U : 0U;
+        tx_msg_temp.StateFlags = (uint8_t)snapshot.mode & CAN_FEEDBACK_MODE_MASK;
+        if (SC_FeedbackNormalRunning(&snapshot))
+        {
+            tx_msg_temp.StateFlags |= CAN_FEEDBACK_FLAG_NORMAL_RUNNING;
+        }
+        if (SC_FeedbackSupplyRequestAllowed(&snapshot))
+        {
+            tx_msg_temp.StateFlags |= CAN_FEEDBACK_FLAG_SUPPLY_REQUEST;
+        }
+        tx_msg_temp.TotalPower = snapshot.battery_power + snapshot.supercap_power;
+        tx_msg_temp.SuperCapVoltage = snapshot.supercap_voltage;
 
-        Can_SendMess(&tx_msg_temp);
+        if (Can_SendMess(&tx_msg_temp) != HAL_OK)
+        {
+            /* 入队失败（如发送队列暂满）：结束本次发送，
+             * 下一周期重新生成并发送最新反馈。 */
+            return;
+        }
     }
 }
 /* USER CODE END 1 */

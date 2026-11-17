@@ -11,6 +11,10 @@ supercap_state_t sc_state = {0};
 // 使能标志位
 volatile uint8_t sc_run_enable = 0U;
 
+/* 线上状态码直接取枚举序号：0 = SC_SELF_TEST … 9 = SC_START_PWM。 */
+_Static_assert(SC_SELF_TEST == 0 && SC_START_PWM == 9,
+               "sc_mode_t order must match the CAN feedback state codes");
+
 // 初始化
 static void reset_power_control(supercap_state_t *s)
 {
@@ -41,10 +45,15 @@ static void enter(supercap_state_t *s, sc_mode_t mode)
         s->self_test_stable_ticks = 0;
     }
 
-    if (mode == SC_FAULT_LATCHED) 
+    if (mode == SC_FAULT_LATCHED)
     {
         s->fault_recovery_ticks = 0;
         s->reset_requested = false;
+    }
+    /* 反馈用停机原因保留到其后的待机；重新进入工作流程时清除。 */
+    if (mode == SC_SELF_TEST || mode == SC_CONNECT_Q3)
+    {
+        s->stop_reason = SC_STOP_REASON_NONE;
     }
     if (mode == SC_CONNECT_Q3) 
     {
@@ -241,6 +250,7 @@ void  SC_Init(supercap_state_t *s)
     s->auto_charge_full = false;
     s->reset_requested = false;
     s->fault_code = SC_FAULT_NONE;
+    s->stop_reason = SC_STOP_REASON_NONE;
     s->adc_offline_count = s->fault_counter = s->load_low_ticks = 0;
     s->battery_overvoltage_counter = 0;
     s->pending_overcurrent = SC_FAULT_NONE;
@@ -519,6 +529,7 @@ void SC_Step(supercap_state_t *s)
         if (s->mode != SC_STOPPING)
         {
             // 更新下电请求，在同一中断周期中处理
+            s->stop_reason = SC_STOP_REASON_REQUEST;
             enter(s, SC_STOPPING);
         }
     }
@@ -617,6 +628,7 @@ void SC_Step(supercap_state_t *s)
         // 依旧preload_than_enable
         if (s->cap_down_ctrl && s->mode != SC_STOPPING)
         {
+            s->stop_reason = SC_STOP_REASON_BUS_UNDERVOLTAGE;
             enter(s, SC_STOPPING);
         }
         else
@@ -698,6 +710,7 @@ void SC_Step(supercap_state_t *s)
         if (s->active_request == SC_REQUEST_STOP ||
             s->adc_values.battery_voltage < SC_VBAT_MIN)
         {
+            s->stop_reason = SC_STOP_REASON_REQUEST;
             enter(s, SC_STOPPING);
         }
         else if (fabsf(s->adc_values.supercap_current - s->connect_icap) > SC_CONNECT_JUMP_A ||
@@ -724,6 +737,7 @@ void SC_Step(supercap_state_t *s)
         if (s->active_request == SC_REQUEST_STOP ||
             s->adc_values.battery_voltage < SC_VBAT_MIN)
         {
+            s->stop_reason = SC_STOP_REASON_REQUEST;
             enter(s, SC_STOPPING);
         }
         else if (s->mode_ticks >= SC_PWM_START_TICKS)
@@ -759,6 +773,15 @@ void SC_Step(supercap_state_t *s)
         else if (s->active_request != SC_REQUEST_CHARGE ||
                    s->adc_values.supercap_voltage >= SC_CHARGE_DONE_VOLTAGE)
         {
+            /* 反馈用：区分满电正常停充与其他正常停机。 */
+            if (s->adc_values.supercap_voltage >= SC_CHARGE_DONE_VOLTAGE)
+            {
+                s->stop_reason = SC_STOP_REASON_CHARGE_FULL;
+            }
+            else
+            {
+                s->stop_reason = SC_STOP_REASON_REQUEST;
+            }
             enter(s, SC_STOPPING);
         }
         // charge_mode(s)返回当前 应该 处于slow_charge/charge mode
@@ -784,6 +807,7 @@ void SC_Step(supercap_state_t *s)
         else if (s->active_request != SC_REQUEST_DISCHARGE ||
                    s->adc_values.battery_voltage < SC_VBAT_MIN)
         {
+            s->stop_reason = SC_STOP_REASON_REQUEST;
             enter(s, SC_STOPPING);
         }
         else if (!discharge_voltage_ready(s))
@@ -803,6 +827,7 @@ void SC_Step(supercap_state_t *s)
             }
             if (s->load_low_ticks >= SC_LOAD_EXIT_TICKS)
             {
+                s->stop_reason = SC_STOP_REASON_REQUEST;
                 enter(s, SC_STOPPING);
             }
             else
@@ -836,6 +861,7 @@ void SC_Step(supercap_state_t *s)
             }
             else
             {
+                s->stop_reason = SC_STOP_REASON_REQUEST;
                 enter(s, SC_STOPPING);
             }
         }
@@ -890,3 +916,85 @@ void SC_Step(supercap_state_t *s)
     // 电流环输出值修改为PWM实际占空比
     update_duty(s);
 }
+
+/* ============================================================================
+ * CAN 反馈（0x220）
+ * ========================================================================== */
+
+/* 复制反馈所需的一致快照；短临界区由调用方负责。 */
+void SC_GetFeedbackSnapshot(sc_feedback_snapshot_t *snapshot)
+{
+    if (snapshot == NULL)
+    {
+        return;
+    }
+    snapshot->run_enable = sc_run_enable;
+    snapshot->run_active = sc_state.run_active;
+    snapshot->mode = sc_state.mode;
+    snapshot->fault_code = sc_state.fault_code;
+    snapshot->stop_reason = sc_state.stop_reason;
+    snapshot->adc_valid = sc_state.adc_valid;
+    snapshot->adc_offline_count = sc_state.adc_offline_count;
+    snapshot->battery_voltage = sc_state.adc_values.battery_voltage;
+    snapshot->supercap_voltage = sc_state.adc_values.supercap_voltage;
+    snapshot->battery_power = sc_state.battery_power;
+    snapshot->supercap_power = sc_state.supercap_power;
+}
+
+/* 正常充放电与满电正常停充计为正常运行；首次启用过程与故障为 0。 */
+bool SC_FeedbackNormalRunning(const sc_feedback_snapshot_t *snapshot)
+{
+    if (snapshot == NULL)
+    {
+        return false;
+    }
+    switch (snapshot->mode)
+    {
+    case SC_SLOW_CHARGE:
+    case SC_CHARGE:
+    case SC_DISCHARGE:
+    case SC_CROSS_ZERO:
+        return true;
+    case SC_STOPPING:
+    case SC_STANDBY:
+        /* 满电正常停充及其后的待机保持为正常运行。 */
+        return snapshot->stop_reason == SC_STOP_REASON_CHARGE_FULL;
+    case SC_SELF_TEST:
+    case SC_CONNECT_Q3:
+    case SC_START_PWM:
+    case SC_FAULT_LATCHED:
+    default:
+        return false;
+    }
+}
+
+/* 板端判定能否允许上位机发起供能请求：正常工作流程、无故障、
+ * ADC 可信且电容组电压严格大于 8 V。ADC 偶发缺样沿用板端认可的电压。 */
+bool SC_FeedbackSupplyRequestAllowed(const sc_feedback_snapshot_t *snapshot)
+{
+    if (snapshot == NULL ||
+        snapshot->run_enable != 1U ||
+        !snapshot->run_active ||
+        !snapshot->adc_valid ||
+        snapshot->fault_code != SC_FAULT_NONE ||
+        snapshot->adc_offline_count >= ADC_OFFLINE_LIMIT ||
+        !(snapshot->supercap_voltage > SC_FEEDBACK_SUPPLY_REQUEST_VOLTAGE) ||
+        snapshot->battery_voltage < SC_VBAT_MIN)
+    {
+        return false;
+    }
+    switch (snapshot->mode)
+    {
+    case SC_SLOW_CHARGE:
+    case SC_CHARGE:
+    case SC_DISCHARGE:
+    case SC_CROSS_ZERO:
+        return true;
+    case SC_STANDBY:
+        /* 正常工作待机：已通过自检，且不是母线欠压等保护性停机的待机。 */
+        return snapshot->stop_reason != SC_STOP_REASON_BUS_UNDERVOLTAGE;
+    default:
+        return false;
+    }
+}
+

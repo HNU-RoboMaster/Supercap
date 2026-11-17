@@ -27,6 +27,14 @@ typedef enum {
     SC_START_PWM      /* Q3 已稳定接通，以 Vcap/Vbat 预置并开启 PWM */
 } sc_mode_t;
 
+/* 反馈用停机原因：进入 SC_STOPPING 时记录，并带到其后的 SC_STANDBY。 */
+typedef enum {
+    SC_STOP_REASON_NONE = 0,          /* 本次使能尚未进入过停机 */
+    SC_STOP_REASON_CHARGE_FULL,       /* 电容组达到充满电压，正常停充 */
+    SC_STOP_REASON_REQUEST,           /* 请求取消或负载不足，正常停机 */
+    SC_STOP_REASON_BUS_UNDERVOLTAGE   /* 母线欠压，保护性停机 */
+} sc_stop_reason_t;
+
 /* AUTO 按负载功率自动选择方向；其余请求用于手动控制。 */
 typedef enum {
     SC_REQUEST_STOP,       /* 停止：不充电也不放电 */
@@ -57,6 +65,22 @@ typedef struct {
     float supercap_current;    /* 电容电流：放电为正，充电为负 */
     float temperature;         /* 预留 ADC 通道 */
 } sc_adc_values_t;
+
+/* CAN 反馈用的板端快照：使能、运行状态、保护结果、功率与电容组电压。
+ * 由 TIM2 在短临界区内复制，归一化和打包在临界区外完成。 */
+typedef struct {
+    uint8_t run_enable;             /* 本次上电的使能开关回读 */
+    bool run_active;                /* 本次使能已从自检入口启动 */
+    sc_mode_t mode;                 /* 当前运行状态 */
+    sc_fault_code_t fault_code;     /* 首个锁存故障 */
+    sc_stop_reason_t stop_reason;   /* 最近一次进入停机的板端原因 */
+    bool adc_valid;                 /* 至少取得过一次有效 ADC 快照 */
+    uint32_t adc_offline_count;     /* 连续无新 ADC 快照的控制周期数 */
+    float battery_voltage;          /* 电池输入侧电压，V */
+    float supercap_voltage;         /* 电容组电压，V */
+    float battery_power;            /* 电池功率，W */
+    float supercap_power;           /* 电容组功率，W；放电为正，充电为负 */
+} sc_feedback_snapshot_t;
 
 
 typedef struct {
@@ -99,6 +123,7 @@ typedef struct {
     // 运行状态标志位
     volatile sc_mode_t mode;
     sc_mode_t next_mode;    // 目前意义不明
+    volatile sc_stop_reason_t stop_reason;  /* 反馈用：最近一次进入 SC_STOPPING 的原因 */
 
     // 运行模式标志位
     volatile sc_request_t request;  // 来自上位机，一般为auto
@@ -168,6 +193,13 @@ void SC_Step(supercap_state_t *state);
 bool SC_PWM_OutputRequested(const supercap_state_t *state);
 /** 锁存首个故障并禁止 PWM；Q3 按电流消退或续流超时断开。 */
 void SC_HandleFault(supercap_state_t *state, sc_fault_code_t code);
+
+/** 复制 CAN 反馈所需的一致快照；调用方负责在外层包住短临界区。 */
+void SC_GetFeedbackSnapshot(sc_feedback_snapshot_t *snapshot);
+/** 按协议表生成反馈字节 1 的「是否正常运行」位。 */
+bool SC_FeedbackNormalRunning(const sc_feedback_snapshot_t *snapshot);
+/** 按协议表生成反馈字节 1 的「允许上位机发起供能请求」位。 */
+bool SC_FeedbackSupplyRequestAllowed(const sc_feedback_snapshot_t *snapshot);
 
 /** 将数值限制在给定闭区间。 */
 static inline float SC_LIMIT(float value, float minimum, float maximum)
