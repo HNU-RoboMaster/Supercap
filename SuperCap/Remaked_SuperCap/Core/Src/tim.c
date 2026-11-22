@@ -399,6 +399,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
             tx_msg_temp.StateFlags |= CAN_FEEDBACK_FLAG_SUPPLY_REQUEST;
         }
         tx_msg_temp.TotalPower = snapshot.battery_power + snapshot.supercap_power;
+        tx_msg_temp.BatteryPower = snapshot.battery_power;
         tx_msg_temp.SuperCapVoltage = snapshot.supercap_voltage;
 
         if (Can_SendMess(&tx_msg_temp) != HAL_OK)

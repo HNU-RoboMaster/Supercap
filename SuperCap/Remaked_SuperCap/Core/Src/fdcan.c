@@ -410,6 +410,7 @@ HAL_StatusTypeDef Can_SendMess(const CAN_TransmitDataTypeDef *TX_temp)
      * 逐字节编码，避免依赖枚举大小、结构体填充和 CPU 字节序。 */
     uint8_t CAN_TX_BUFF[CAN_FEEDBACK_DLC] = {0};
     uint16_t total_power = feedback_encode_power(TX_temp->TotalPower);
+    uint16_t bat_power   = feedback_encode_power(TX_temp->BatteryPower);
 
     CAN_TX_BUFF[CAN_FEEDBACK_BYTE_RUN_ENABLE] =
         (TX_temp->RunEnable == 1U) ? 1U : 0U;
@@ -419,6 +420,8 @@ HAL_StatusTypeDef Can_SendMess(const CAN_TransmitDataTypeDef *TX_temp)
     CAN_TX_BUFF[CAN_FEEDBACK_BYTE_POWER_MSB] = (uint8_t)((total_power >> 8U) & 0xFFU);
     CAN_TX_BUFF[CAN_FEEDBACK_BYTE_ENERGY_PCT] =
         feedback_encode_energy(TX_temp->SuperCapVoltage);
+    CAN_TX_BUFF[CAN_FEEDBACK_BYTE_BAT_POWER_LSB] = (uint8_t)(bat_power & 0xFFU);
+    CAN_TX_BUFF[CAN_FEEDBACK_BYTE_BAT_POWER_MSB] = (uint8_t)((bat_power >> 8U) & 0xFFU);
 
     if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) == 0U)
     {

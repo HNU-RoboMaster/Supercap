@@ -47,6 +47,9 @@ extern FDCAN_HandleTypeDef hfdcan1;
 #define CAN_FEEDBACK_BYTE_POWER_LSB     (2U)   /* 字节 2：总功率低字节 */
 #define CAN_FEEDBACK_BYTE_POWER_MSB     (3U)   /* 字节 3：总功率高字节 */
 #define CAN_FEEDBACK_BYTE_ENERGY_PCT    (4U)   /* 字节 4：储能百分比 */
+#define CAN_FEEDBACK_BYTE_BAT_POWER_LSB (5U)   /* 字节 5：电池侧功率低字节 */
+#define CAN_FEEDBACK_BYTE_BAT_POWER_MSB (6U)   /* 字节 6：电池侧功率高字节，0.01W/LSB */
+/* 字节 7 保留 */
 /* 字节 5～7 保留，发送时填 0 */
 
 #define CAN_FEEDBACK_MODE_MASK            (0x0FU) /* 字节 1 低 4 位：sc_mode_t 状态码 */
@@ -118,6 +121,7 @@ typedef struct {
   uint8_t RunEnable;            // 字节 0：首次使能确认，回读 sc_run_enable
   uint8_t StateFlags;           // 字节 1：bit0-3 状态码，bit4 正常运行，bit5 允许供能请求
   float TotalPower;             // 字节 2-3：Pbat + Pcap，单位 W，编码为 0.01 W/LSB
+  float BatteryPower;           // 字节 5-6：电池侧功率 Pbat，单位 W，编码为 0.01 W/LSB
   float SuperCapVoltage;        // 字节 4：电容组电压，用于 8~25 V 储能百分比
 } CAN_TransmitDataTypeDef;
 
