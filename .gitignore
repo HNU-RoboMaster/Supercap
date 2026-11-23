@@ -7,5 +7,6 @@
 /SuperCap/Remaked_SuperCap/cmake-build-debug-mingwstm32-gccg/
 /SuperCap/Remaked_SuperCap/tests/
 /.idea/
-/docs/
+/docs/*
 /Supercap_test
+!/docs/上下位机CAN通信协议.md
