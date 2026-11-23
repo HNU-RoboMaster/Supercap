@@ -294,10 +294,17 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
                                    (float)can_pending.budget_w * CAN_COMMAND_BUDGET_SCALE,
                                    can_pending.robot_alive, can_pending.rx_ms, now_ms);
         }
-        if (can_pending.enable_request)
+        if (can_pending.enable_pending)
         {
-            /* 首次使能只置位运行开关；启动与自检仍由状态机负责。 */
-            SC_ApplyEnableRequest(&sc_state, now_ms);
+            if (can_pending.enable)
+            {
+                SC_ApplyEnableRequest(&sc_state, now_ms);
+            }
+            else
+            {
+                /* 清除运行开关，交由本周期的 SC_Step 执行正常停机。 */
+                SC_ApplyDisableRequest(&sc_state);
+            }
         }
         SC_AdvanceControlTimeout(&sc_state, now_ms);
 #endif

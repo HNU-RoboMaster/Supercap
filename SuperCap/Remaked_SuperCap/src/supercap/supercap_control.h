@@ -88,8 +88,8 @@ typedef struct {
     bool budget_valid;          /* 上位机发送的power_reference */
     uint32_t budget_rx_ms;      /* 功率控制帧接收时间，用于判断500ms断连 */
     bool timing_from_frame;     /* 表示使能后已收到过有效控制帧 */
-    bool enable_applied;        /* 接收到CAN使能标志位（非调试器使能） */
-    uint32_t enable_applied_ms; /* 首次使能应用时刻；第一段控制超时从此刻起算 */
+    bool enable_applied;        /* 由 CAN 使能，收到失能命令时清除 */
+    uint32_t enable_applied_ms; /* 本次使能应用时刻；第一段控制超时从此刻起算 */
 
     bool robot_alive_valid;     /* 存活字段有效 */
     uint8_t robot_alive;        /* 最近有效控制帧的存活值；首版不据此改变运行 */
@@ -187,7 +187,7 @@ typedef struct {
 } supercap_state_t;
 
 extern supercap_state_t sc_state;   // 储存超电所有业务状态的统一结构体
-/** 板端运行开关：上电默认 0；1 从自检开始。CAN 首次使能接入只允许置 1，不允许清零。 */
+/** 板端运行开关：上电默认 0；置 1 从自检开始，清零请求正常停机。 */
 extern volatile uint8_t sc_run_enable;
 
 /** 初始化 PI 和输出；默认自动充放电，等待运行开关置 1 后开始自检。 */
@@ -199,8 +199,10 @@ void SC_RequestFaultReset(supercap_state_t *state);
 /** 应用一帧有效上位机控制参数；接收时间超过控制时限的帧被忽略。 */
 void SC_ApplyControlCommand(supercap_state_t *state, float budget_w,
                             uint8_t robot_alive, uint32_t rx_ms, uint32_t now_ms);
-/** 消费首次使能请求：只置位运行开关并建立计时，不重置状态机或故障。 */
+/** 应用使能请求：置位运行开关并建立计时，不重置状态机或故障。 */
 void SC_ApplyEnableRequest(supercap_state_t *state, uint32_t now_ms);
+/** 应用失能请求：清除运行开关，正常停机由 SC_Step 执行。 */
+void SC_ApplyDisableRequest(supercap_state_t *state);
 /** 推进控制失联计时：已使能后连续无有效控制帧达到时限时恢复默认预算。 */
 void SC_AdvanceControlTimeout(supercap_state_t *state, uint32_t now_ms);
 /** 将五路 ADC 原始值换算为电压、电流和预留温度量。 */

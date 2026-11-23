@@ -65,8 +65,8 @@ extern FDCAN_HandleTypeDef hfdcan1;
 #define CAN_FEEDBACK_ENERGY_MAX_VOLTAGE   (25.0f)
 
 /* 下行命令帧 0x221 的报文契约（标准帧、经典数据帧、DLC 8）：
- * 字节 0 为命令类型，0x01 使能、0x02 控制；
- * 使能帧字节 1 为 Enable（1 请求首次使能，0 无失能语义）；
+ * 字节 0 为命令类型，0x01 使能/失能、0x02 控制；
+ * 使能/失能帧字节 1 为 Enable（1 请求使能，0 请求正常停机）；
  * 控制帧字节 1 为 RobotAlive（首版恒为 1，0 的处理待讨论），
  * 字节 2～3 为电池侧预算（小端 uint16_t、1 W/LSB），字节 4～7 保留并忽略。 */
 #define CAN_COMMAND_DLC                 (8U)
@@ -83,11 +83,11 @@ extern FDCAN_HandleTypeDef hfdcan1;
 /* 预算换算：budget_w = (float)raw_budget × 1 W/LSB，不额外限制取值。 */
 #define CAN_COMMAND_BUDGET_SCALE        (1.0f)
 
-/* 一帧通过校验后的命令内容：使能请求与控制参数各用各的字段。 */
+/* 一帧通过校验后的命令内容。 */
 typedef struct
 {
-  bool is_control;      /* true：控制命令(0x02)；false：使能命令(0x01) */
-  bool enable_request;  /* 使能命令且 Enable=1；控制命令恒为 false */
+  bool is_control;      /* true：控制命令(0x02)；false：使能/失能命令(0x01) */
+  bool enable;          /* 使能/失能命令的 Enable 值 */
   uint16_t budget_w;    /* 控制命令的电池侧预算，1 W/LSB */
   uint8_t robot_alive;  /* 控制命令的存活标志 */
 } can_command_t;
@@ -95,7 +95,8 @@ typedef struct
 /* 待应用命令的本地交接视图；接收时间属于本地元数据，不占业务字节。 */
 typedef struct
 {
-  bool enable_request;   /* 有待消费的首次使能请求 */
+  bool enable_pending;  /* 有新的使能/失能命令 */
+  bool enable;          /* 最新使能/失能命令的 Enable 值 */
   bool control_pending;  /* 有新的完整控制参数 */
   uint16_t budget_w;     /* 最新完整控制帧的预算 */
   uint8_t robot_alive;   /* 同一控制帧的存活标志 */
@@ -106,7 +107,7 @@ typedef struct
 void CAN_Command_Init(void);
 /**
  * 发布一帧已解码命令；调用方（FDCAN 接收回调）负责用短临界区包住本函数。
- * 控制帧覆盖旧控制参数；使能请求保留到消费，Enable=0 不产生也不取消请求。
+ * 控制帧和使能/失能帧各自保留最新有效值，直至消费。
  */
 void CAN_Command_Publish(const can_command_t *command, uint32_t rx_ms);
 /**

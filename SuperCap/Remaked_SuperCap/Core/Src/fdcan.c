@@ -27,6 +27,7 @@ FDCAN_TxHeaderTypeDef sFDCAN1_TxHeader;
 typedef struct
 {
     volatile bool enable_pending;
+    volatile bool enable;
     volatile bool control_pending;
     volatile uint16_t budget_w;
     volatile uint8_t robot_alive;
@@ -154,6 +155,7 @@ void HAL_FDCAN_MspDeInit(FDCAN_HandleTypeDef* fdcanHandle)
 void CAN_Command_Init(void)
 {
     s_command_cache.enable_pending = false;
+    s_command_cache.enable = false;
     s_command_cache.control_pending = false;
     s_command_cache.budget_w = 0U;
     s_command_cache.robot_alive = 0U;
@@ -162,7 +164,7 @@ void CAN_Command_Init(void)
 
 /**
  * 校验 HAL 帧头与命令类型并解码。
- * 非法帧（错误 ID、扩展帧、远程帧、FD 帧、错误长度、未知类型、非法存活值）
+ * 非法帧（错误 ID、扩展帧、远程帧、FD 帧、错误长度、未知类型、非法使能值或存活值）
  * 返回 false，调用方不得发布任何更新。保留字节不参与解码。
  */
 static bool CAN_Command_Decode(const FDCAN_RxHeaderTypeDef *header, const uint8_t *data,
@@ -184,18 +186,19 @@ static bool CAN_Command_Decode(const FDCAN_RxHeaderTypeDef *header, const uint8_
     }
 
     out->is_control = false;
-    out->enable_request = false;
+    out->enable = false;
     out->budget_w = 0U;
     out->robot_alive = 0U;
 
     switch (data[CAN_COMMAND_BYTE_TYPE])
     {
     case CAN_COMMAND_TYPE_ENABLE:
-        /* Enable=0 是合法报文但不新增请求，也没有失能语义。 */
-        if (data[CAN_COMMAND_BYTE_ENABLE] == CAN_COMMAND_ENABLE_REQUEST)
+        /* Enable 只允许 0 或 1；0 请求正常停机。 */
+        if (data[CAN_COMMAND_BYTE_ENABLE] > CAN_COMMAND_ENABLE_REQUEST)
         {
-            out->enable_request = true;
+            return false;
         }
+        out->enable = data[CAN_COMMAND_BYTE_ENABLE] == CAN_COMMAND_ENABLE_REQUEST;
         return true;
 
     case CAN_COMMAND_TYPE_CONTROL:
@@ -231,14 +234,11 @@ void CAN_Command_Publish(const can_command_t *command, uint32_t rx_ms)
         s_command_cache.rx_ms = rx_ms;
         s_command_cache.control_pending = true;
     }
-    else if (command->enable_request)
-    {
-        /* 有效使能请求一直保留到消费，不设置过期时间。 */
-        s_command_cache.enable_pending = true;
-    }
     else
     {
-        /* Enable=0：不新增请求，也不取消已保留的请求。 */
+        /* 同类帧连续到达时，使用最近收到的 Enable 值。 */
+        s_command_cache.enable = command->enable;
+        s_command_cache.enable_pending = true;
     }
 }
 
@@ -249,7 +249,8 @@ void CAN_Command_TakePending(can_command_pending_t *out)
         return;
     }
 
-    out->enable_request = s_command_cache.enable_pending;
+    out->enable_pending = s_command_cache.enable_pending;
+    out->enable = s_command_cache.enable;
     out->control_pending = s_command_cache.control_pending;
     out->budget_w = s_command_cache.budget_w;
     out->robot_alive = s_command_cache.robot_alive;

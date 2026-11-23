@@ -321,7 +321,7 @@ void SC_ApplyControlCommand(supercap_state_t *s, float budget_w,
     }
 }
 
-/* 首次使能：只允许置位运行开关；重复请求不重启自检、不清故障、不重置计时。 */
+/* 使能：置位运行开关；重复请求不重启自检、不清故障、不重置计时。 */
 void SC_ApplyEnableRequest(supercap_state_t *s, uint32_t now_ms)
 {
     if (s == NULL)
@@ -344,6 +344,18 @@ void SC_ApplyEnableRequest(supercap_state_t *s, uint32_t now_ms)
     {
         s->power_reference = POWER_REFERENCE_DEFAULT;
     }
+}
+
+void SC_ApplyDisableRequest(supercap_state_t *s)
+{
+    if (s == NULL)
+    {
+        return;
+    }
+
+    /* SC_Step 根据运行开关推进停机，失能后停止 CAN 控制失联计时。 */
+    sc_run_enable = 0U;
+    s->host_control.enable_applied = false;
 }
 
 /* 已使能后按第一段（使能应用时间）或后续（最近有效控制帧）计时；
