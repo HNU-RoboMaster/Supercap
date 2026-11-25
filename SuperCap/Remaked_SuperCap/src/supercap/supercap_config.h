@@ -210,7 +210,7 @@ extern "C" {
 #define SC_CONNECT_TIMEOUT      (SC_CONTROL_HZ / 5U)   /* Q3 接入最长等待：200 ms */
 #define SC_PWM_START_TICKS      (2U) /* 平衡占空比预装载及 MOE 开放后，再交给电流环 */
 #define SC_ZERO_STABLE_TICKS    (SC_CONTROL_HZ / 200U) /* 电流连续近零：5 ms */
-#define SC_ZERO_TIMEOUT        (SC_CONTROL_HZ / 2U)    /* 换向过零超时：500 ms */
+#define SC_ZERO_TIMEOUT        (SC_CONTROL_HZ)         /* 换向过零超时：1 s，给体二极管残流衰减留余量 */
 #define SC_STOP_TIMEOUT        (SC_CONTROL_HZ / 2U)    /* 正常停机超时：500 ms */
 #define SC_LOAD_EXIT_TICKS     (SC_CONTROL_HZ / 10U)   /* 低负载持续：100 ms */
 #define SC_FAULT_FREEWHEEL_TICKS (SC_CONTROL_HZ / 100U) /* 故障后 Q3 最长续流：10 ms */
@@ -224,7 +224,7 @@ extern "C" {
 #define SC_CHARGE_DONE_VOLTAGE  (25.5f) /* 充满并正常停止 */
 
 /* 电流及接入判据，单位 A；接入电压跳变判据单位 V。 */
-#define SC_CURRENT_ZERO_A      (0.25f) /* 换向/停机的实测电流近零门限 */
+#define SC_CURRENT_ZERO_A      (1.2f)  /* 换向/停机的实测电流近零门限；过零时体二极管残流约 0.8~1.1A，门限太低会一直判不过 */
 #define SC_SELF_TEST_ZERO_A    (0.6f)  /* 自检时电流零点容差 */
 #define SC_CONNECT_JUMP_A      (2.0f)  /* Q3 接入瞬间允许的电流变化 */
 #define SC_CONNECT_JUMP_V      (5.0f)  /* Q3 接入瞬间允许的电压变化 */
